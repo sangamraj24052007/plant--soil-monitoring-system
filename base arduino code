@@ -1,0 +1,170 @@
+/* 
+  Smart IoT-Enabled Soil Health Monitoring and Management System
+  (Arduino UNO Version - Offline)
+  
+  Hardware:
+    - Arduino UNO
+    - Capacitive Soil Moisture Sensor → A0
+    - Rain Sensor → D2 (digital)
+    - Ultrasonic Sensor → TRIG=D3, ECHO=D4
+    - SSD1306 OLED (I2C) → SDA=A4, SCL=A5
+*/
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// OLED configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Pin definitions
+const int soilPin = A0;      // Analog pin for soil moisture sensor
+const int rainPin = 2;       // Digital pin for rain sensor
+const int trigPin = 3;       // Ultrasonic trigger
+const int echoPin = 4;       // Ultrasonic echo
+
+// ADC and reference voltage (Arduino UNO)
+const float ADC_MAX = 1023.0;
+const float VREF = 5.0;
+
+// Ultrasonic baseline distance (cm)
+float baselineDistance = 0.0;
+
+void setup() {
+  Serial.begin(9600);
+  
+  pinMode(rainPin, INPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  Wire.begin();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED initialization failed!");
+    while (1);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Initializing...");
+  display.display();
+
+  // Measure initial soil surface height
+  baselineDistance = measureUltrasonicAverage(5);
+  Serial.print("Baseline Distance: ");
+  Serial.print(baselineDistance);
+  Serial.println(" cm");
+
+  delay(1500);
+}
+
+void loop() {
+  // 1. Read soil moisture (convert ADC to percentage)
+  int rawSoil = analogRead(soilPin);
+  float soilPercent = map(rawSoil, 0, 1023, 0, 100); // 0 = dry, 100 = wet
+  soilPercent = constrain(soilPercent, 0, 100);
+
+  // 2. Detect rain
+  bool isRaining = (digitalRead(rainPin) == LOW); // LOW = rain detected (depends on module)
+
+  // 3. Measure surface height
+  float currentDist = measureUltrasonicAverage(3);
+  float delta = baselineDistance - currentDist; // Positive = soil erosion
+  if (delta < 0) delta = 0;
+
+  // 4. Compute sub-scores
+  float moistureScore = computeMoistureScore(soilPercent);
+  float erosionScore = computeErosionScore(delta);
+  float rainPenalty = isRaining ? 20.0 : 0.0;
+
+  // 5. Compute overall score
+  float total = (0.5 * moistureScore) + (0.3 * erosionScore) - rainPenalty;
+  total = constrain(total, 0, 100);
+
+  // 6. Interpret results
+  String agriSuit = "NOT SUIT";
+  String buildSuit = "NOT SUIT";
+
+  if (total >= 75) agriSuit = "SUITABLE";
+  else if (total >= 50) agriSuit = "MODERATE";
+
+  if (total >= 85 && delta < 1.0 && soilPercent < 55.0 && !isRaining) buildSuit = "POSSIBLE";
+  else if (total >= 70 && delta < 1.0) buildSuit = "CHECK";
+
+  // 7. Display results on OLED
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("Soil: ");
+  display.print(soilPercent, 0);
+  display.println("%");
+
+  display.print("Delta: ");
+  display.print(delta, 1);
+  display.println("cm");
+
+  display.print("Score: ");
+  display.println(total, 0);
+
+  display.print("Agri: ");
+  display.println(agriSuit);
+
+  display.print("Build: ");
+  display.println(buildSuit);
+
+  display.display();
+
+  // 8. Serial log
+  Serial.print("Soil%: ");
+  Serial.print(soilPercent);
+  Serial.print(", Delta: ");
+  Serial.print(delta);
+  Serial.print(", Total: ");
+  Serial.print(total);
+  Serial.print(", Rain: ");
+  Serial.println(isRaining);
+
+  delay(5000); // Refresh every 5 seconds
+}
+
+// ---------- Helper Functions ----------
+
+// Get average of multiple ultrasonic readings
+float measureUltrasonicAverage(int n) {
+  float sum = 0;
+  for (int i = 0; i < n; i++) {
+    sum += measureUltrasonic();
+    delay(50);
+  }
+  return sum / n;
+}
+
+// Measure one ultrasonic distance (in cm)
+float measureUltrasonic() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000UL);
+  float distance = duration * 0.0343 / 2.0;
+  return distance;
+}
+
+// Calculate soil moisture score (0–100)
+float computeMoistureScore(float percent) {
+  if (percent >= 35.0 && percent <= 60.0) return 100.0;
+  if (percent < 35.0) return (percent / 35.0) * 100.0;
+  if (percent > 60.0) return (1.0 - ((percent - 60.0) / 40.0)) * 100.0;
+  return 0.0;
+}
+
+// Calculate erosion score (0–100)
+float computeErosionScore(float delta_cm) {
+  if (delta_cm < 1.0) return 100.0;
+  if (delta_cm < 3.0) return 100.0 - ((delta_cm - 1.0) * 25.0);
+  return 0.0;
+}
